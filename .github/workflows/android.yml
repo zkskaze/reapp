@@ -122,8 +122,7 @@ jobs:
           if ! ./gradlew --no-daemon --no-build-cache --console=plain :app:testDebugUnitTest :app:lintRelease :app:assembleRelease \
             -PversionName="${TAG#v}" -PversionCode="$VERSION_CODE" > "$RUNNER_TEMP/build.log" 2>&1; then
             # Keep source and complete build logs out of persistent GitHub artifacts.
-            grep -E '(^e:|^w:|^FAILURE:|^\* What went wrong|^> |\.kt:[0-9]+:|\.xml:[0-9]+:|^.*Error:|^.*error:)' "$RUNNER_TEMP/build.log" | head -100 || true
-            tail -18 "$RUNNER_TEMP/build.log"
+            grep -E '(^e:|^w:|^FAILURE:|^\* What went wrong|^> |\.kt:[0-9]+:|\.xml:[0-9]+:|^.*Error:|^.*error:|Could not|Plugin .*not found|^A problem|^BUILD FAILED)' "$RUNNER_TEMP/build.log" | head -100 || true
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/release"
