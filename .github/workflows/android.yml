@@ -171,6 +171,8 @@ jobs:
           grep 'certificate SHA-256 digest:' "$RUNNER_TEMP/signature.txt" >> build-info.txt
           sha256sum *.apk build-info.txt login.png > checksums.txt
           gh release upload "$TAG" ./*.apk build-info.txt checksums.txt login.png --repo "$GITHUB_REPOSITORY" --clobber
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+            | jq -e 'all(.[]; .name | test("\\.(apk|png|txt)$"))' >/dev/null
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           echo "Signed APK released. Source was never committed or uploaded as an artifact." >> "$GITHUB_STEP_SUMMARY"
 
