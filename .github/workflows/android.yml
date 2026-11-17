@@ -37,11 +37,11 @@ jobs:
       RELEASE_ID: ${{ inputs.release_id }}
       EXPECTED_SHA256: ${{ inputs.sha256 }}
       VERSION_CODE: ${{ inputs.version_code }}
-      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
     steps:
       - name: Validate release inputs
         run: |
           set -euo pipefail
+          echo "GRADLE_USER_HOME=$RUNNER_TEMP/gradle-home" >> "$GITHUB_ENV"
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
           [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
           [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
