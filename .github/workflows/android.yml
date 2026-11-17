@@ -157,7 +157,7 @@ jobs:
             sleep 5
             adb shell uiautomator dump /sdcard/window.xml
             adb pull /sdcard/window.xml "$RUNNER_TEMP/window.xml"
-            python3 -c "import os; from pathlib import Path; text=(Path(os.environ['RUNNER_TEMP'])/'window.xml').read_text(); assert 'Prijavi se' in text and 'Korisničko ime' in text, 'Login screen did not render'"
+            python3 -c "import os; from pathlib import Path; text=(Path(os.environ['RUNNER_TEMP'])/'window.xml').read_text(); assert 'Пријави се' in text and 'Корисничко име' in text, 'Login screen did not render'"
             adb logcat -d -b crash > "$RUNNER_TEMP/crash.log"
             test ! -s "$RUNNER_TEMP/crash.log" || { cat "$RUNNER_TEMP/crash.log"; exit 1; }
             adb shell screencap -p /sdcard/login.png
