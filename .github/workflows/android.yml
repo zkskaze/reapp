@@ -157,11 +157,12 @@ jobs:
             sleep 5
             adb shell uiautomator dump /sdcard/window.xml
             adb pull /sdcard/window.xml "$RUNNER_TEMP/window.xml"
-            python3 -c "import os; from pathlib import Path; text=(Path(os.environ['RUNNER_TEMP'])/'window.xml').read_text(); assert 'Пријави се' in text and 'Корисничко име' in text, 'Login screen did not render'"
-            adb logcat -d -b crash > "$RUNNER_TEMP/crash.log"
-            test ! -s "$RUNNER_TEMP/crash.log" || { cat "$RUNNER_TEMP/crash.log"; exit 1; }
             adb shell screencap -p /sdcard/login.png
             adb pull /sdcard/login.png "$RUNNER_TEMP/release/login.png"
+            gh release upload "$TAG" "$RUNNER_TEMP/release/login.png" --repo "$GITHUB_REPOSITORY" --clobber
+            python3 -c "import os; from pathlib import Path; import xml.etree.ElementTree as ET; root=ET.parse(Path(os.environ['RUNNER_TEMP'])/'window.xml').getroot(); text=' '.join(value for node in root.iter() for value in node.attrib.values()); print('UI labels:', [node.attrib.get('text') for node in root.iter() if node.attrib.get('text')]); assert 'Пријави се' in text and 'Корисничко име' in text, 'Login screen did not render'"
+            adb logcat -d -b crash > "$RUNNER_TEMP/crash.log"
+            test ! -s "$RUNNER_TEMP/crash.log" || { cat "$RUNNER_TEMP/crash.log"; exit 1; }
 
       - name: Publish signed APK release
         run: |
