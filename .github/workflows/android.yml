@@ -142,7 +142,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Launch signed APK and capture login screen
+      - name: Verify login, updates and system notifications
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -152,15 +152,16 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             adb install "$RUNNER_TEMP/release/rekaze-$TAG.apk"
+            adb shell pm grant zks.rekaze.app android.permission.POST_NOTIFICATIONS
             adb logcat -c
             adb shell am start -W -n zks.rekaze.app/.MainActivity
             sleep 5
-            adb shell uiautomator dump /sdcard/window.xml
-            adb pull /sdcard/window.xml "$RUNNER_TEMP/window.xml"
-            adb shell screencap -p /sdcard/login.png
-            adb pull /sdcard/login.png "$RUNNER_TEMP/release/login.png"
+            python3 "$RUNNER_TEMP/context/app/qa/verify-ui.py" login
             gh release upload "$TAG" "$RUNNER_TEMP/release/login.png" --repo "$GITHUB_REPOSITORY" --clobber
-            python3 -c "import os; from pathlib import Path; import xml.etree.ElementTree as ET; root=ET.parse(Path(os.environ['RUNNER_TEMP'])/'window.xml').getroot(); text=' '.join(value for node in root.iter() for value in node.attrib.values()); print('UI labels:', [node.attrib.get('text') for node in root.iter() if node.attrib.get('text')]); assert 'Пријави се' in text and 'Корисничко име' in text, 'Login screen did not render'"
+            adb shell am start -W -n zks.rekaze.app/.MainActivity --es screen updates
+            python3 "$RUNNER_TEMP/context/app/qa/verify-ui.py" updates
+            adb shell am start -W -n zks.rekaze.app/.MainActivity --es screen notification-settings
+            python3 "$RUNNER_TEMP/context/app/qa/verify-ui.py" notifications
             adb logcat -d -b crash > "$RUNNER_TEMP/crash.log"
             test ! -s "$RUNNER_TEMP/crash.log" || { cat "$RUNNER_TEMP/crash.log"; exit 1; }
 
@@ -168,10 +169,10 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/release"
-          printf 'applicationId=zks.rekaze.app\nversionName=%s\nversionCode=%s\ncontext_sha256=%s\nchecks=unit-tests,lint,signature,emulator-launch\n' "${TAG#v}" "$VERSION_CODE" "$EXPECTED_SHA256" > build-info.txt
+          printf 'applicationId=zks.rekaze.app\nversionName=%s\nversionCode=%s\ncontext_sha256=%s\nchecks=unit-tests,lint,signature,emulator-login,emulator-updates,system-notification,background-schedule\n' "${TAG#v}" "$VERSION_CODE" "$EXPECTED_SHA256" > build-info.txt
           grep 'certificate SHA-256 digest:' "$RUNNER_TEMP/signature.txt" >> build-info.txt
-          sha256sum *.apk build-info.txt login.png > checksums.txt
-          gh release upload "$TAG" ./*.apk build-info.txt checksums.txt login.png --repo "$GITHUB_REPOSITORY" --clobber
+          sha256sum *.apk build-info.txt *.png > checksums.txt
+          gh release upload "$TAG" ./*.apk build-info.txt checksums.txt ./*.png --repo "$GITHUB_REPOSITORY" --clobber
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
             | jq -e 'all(.[]; .name | test("\\.(apk|png|txt)$"))' >/dev/null
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
