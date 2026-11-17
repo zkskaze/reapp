@@ -1,0 +1,177 @@
+name: Build RE Kaze Android
+run-name: Android ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        required: true
+        description: Release tag
+      release_id:
+        required: true
+        description: Draft release containing encrypted source
+      context_secret:
+        required: true
+        description: Temporary AES-GCM key secret name
+      sha256:
+        required: true
+        description: SHA-256 of decrypted archive
+      version_code:
+        required: true
+        description: Monotonically increasing Android version code
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rekaze-android-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ inputs.tag }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      EXPECTED_SHA256: ${{ inputs.sha256 }}
+      VERSION_CODE: ${{ inputs.version_code }}
+      GRADLE_USER_HOME: ${{ runner.temp }}/gradle-home
+    steps:
+      - name: Validate release inputs
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$VERSION_CODE" =~ ^[0-9]{1,10}$ ]]
+          (( VERSION_CODE > 0 && VERSION_CODE < 2100000000 ))
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            | jq -e --arg tag "$TAG" '.draft == true and .tag_name == $tag' >/dev/null
+
+      - name: Decrypt temporary source in runner memory workspace
+        env:
+          CONTEXT_KEY: ${{ secrets[inputs.context_secret] }}
+        run: |
+          set -euo pipefail
+          test -n "$CONTEXT_KEY"
+          asset_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --jq '.[] | select(.name == "android-context.enc") | .id')
+          [[ "$asset_id" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" -H 'Accept: application/octet-stream' > "$RUNNER_TEMP/context.enc"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { createDecipheriv, createHash } from 'node:crypto';
+          const encrypted = readFileSync(`${process.env.RUNNER_TEMP}/context.enc`);
+          const key = Buffer.from(process.env.CONTEXT_KEY.trim(), 'base64');
+          if (key.length !== 32 || encrypted.length < 29) throw new Error('Invalid encrypted context');
+          const decipher = createDecipheriv('aes-256-gcm', key, encrypted.subarray(0, 12));
+          decipher.setAuthTag(encrypted.subarray(12, 28));
+          const plain = Buffer.concat([decipher.update(encrypted.subarray(28)), decipher.final()]);
+          if (createHash('sha256').update(plain).digest('hex') !== process.env.EXPECTED_SHA256) throw new Error('Context checksum mismatch');
+          writeFileSync(`${process.env.RUNNER_TEMP}/context.tar.gz`, plain, { mode: 0o600 });
+          key.fill(0);
+          NODE
+          python3 <<'PY'
+          import os, pathlib, tarfile
+          destination = pathlib.Path(os.environ['RUNNER_TEMP']) / 'context'
+          destination.mkdir()
+          with tarfile.open(destination.parent / 'context.tar.gz') as archive:
+              for member in archive.getmembers():
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or '..' in path.parts or not (member.isfile() or member.isdir()):
+                      raise RuntimeError('Unsafe archive member')
+              archive.extractall(destination, filter='data')
+          PY
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 SDK
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' >/dev/null
+
+      - name: Restore release signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          chmod 600 "$RUNNER_TEMP/release.p12"
+
+      - name: Compile, test, lint and sign
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/release.p12
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/context"
+          chmod +x gradlew
+          if ! ./gradlew --no-daemon --no-build-cache --console=plain :app:testDebugUnitTest :app:lintRelease :app:assembleRelease \
+            -PversionName="${TAG#v}" -PversionCode="$VERSION_CODE" > "$RUNNER_TEMP/build.log" 2>&1; then
+            # Keep source and complete build logs out of persistent GitHub artifacts.
+            grep -E '(^e:|^w:|^FAILURE:|^\* What went wrong|^> |\.kt:[0-9]+:|\.xml:[0-9]+:|^.*Error:|^.*error:)' "$RUNNER_TEMP/build.log" | head -100 || true
+            tail -18 "$RUNNER_TEMP/build.log"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/release"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/release/rekaze-$TAG.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$RUNNER_TEMP/release/rekaze-$TAG.apk" > "$RUNNER_TEMP/signature.txt"
+          echo 'Kotlin compilation, unit tests, Android lint and APK signature verification passed.'
+
+      - name: Enable Android emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Launch signed APK and capture login screen
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            adb install "$RUNNER_TEMP/release/rekaze-$TAG.apk"
+            adb logcat -c
+            adb shell am start -W -n zks.rekaze.app/.MainActivity
+            sleep 5
+            adb shell uiautomator dump /sdcard/window.xml
+            adb pull /sdcard/window.xml "$RUNNER_TEMP/window.xml"
+            python3 -c "import os; from pathlib import Path; text=(Path(os.environ['RUNNER_TEMP'])/'window.xml').read_text(); assert 'Prijavi se' in text and 'Korisničko ime' in text, 'Login screen did not render'"
+            adb logcat -d -b crash > "$RUNNER_TEMP/crash.log"
+            test ! -s "$RUNNER_TEMP/crash.log" || { cat "$RUNNER_TEMP/crash.log"; exit 1; }
+            adb shell screencap -p /sdcard/login.png
+            adb pull /sdcard/login.png "$RUNNER_TEMP/release/login.png"
+
+      - name: Publish signed APK release
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/release"
+          printf 'applicationId=zks.rekaze.app\nversionName=%s\nversionCode=%s\ncontext_sha256=%s\nchecks=unit-tests,lint,signature,emulator-launch\n' "${TAG#v}" "$VERSION_CODE" "$EXPECTED_SHA256" > build-info.txt
+          grep 'certificate SHA-256 digest:' "$RUNNER_TEMP/signature.txt" >> build-info.txt
+          sha256sum *.apk build-info.txt login.png > checksums.txt
+          gh release upload "$TAG" ./*.apk build-info.txt checksums.txt login.png --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          echo "Signed APK released. Source was never committed or uploaded as an artifact." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Delete temporary source, signing key and encrypted upload
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]; then
+            asset_id=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --jq '.[] | select(.name == "android-context.enc") | .id')
+            if [[ "$asset_id" =~ ^[0-9]+$ ]]; then gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
+          fi
+          rm -rf -- "$RUNNER_TEMP/context" "$RUNNER_TEMP/context.enc" "$RUNNER_TEMP/context.tar.gz" "$RUNNER_TEMP/release.p12" "$RUNNER_TEMP/gradle-home" "$RUNNER_TEMP/build.log"
